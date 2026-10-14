@@ -26,7 +26,7 @@ bool sensorTerhubung = true;
 bool buttonDitekan = false;
 uint16_t pakanJarak = 0;
 const u_int16_t intervalbacaSensor = 1000;
-u_int16_t durasiBuka = 5000;
+u_int16_t durasiBuka = 10000;
 u_int8_t delayLoop = 100;
 
 u_int32_t lastloop = 0;
@@ -104,8 +104,39 @@ void inisiasiSensor(){
   }
 }
 
-// ----------------------------
-// Fungsi mengirim data sensor ke Backend
+void bacaSensor(){
+  if (sensorTerhubung) {
+    uint16_t measure = sensor.readRangeContinuousMillimeters();
+    if (measure <= 2000){
+      pakanJarak = measure;
+      Serial.printf("Jarak : %d mm\n", pakanJarak);
+    }
+
+    else if (measure >= 65535){
+      Serial.printf(
+        "TIMEOUT, ada kabel lepas di sensor. Kode:%d\n",
+        measure
+      );
+      sensorTerhubung=false;
+    }
+
+    else if (measure >= 8190){
+      Serial.printf(
+        "OUT OF RANGE. Kode:%d\n",
+        measure
+      );
+    }
+  }
+
+  else {
+    if (millis()-lastinisiasiSensor >= 10000){
+      lastinisiasiSensor = millis();
+      Serial.println("Mencoba Reconnect Sensor...");
+      inisiasiSensor();
+    }
+  }
+}
+
 void kirimDataSensor(uint16_t jarakMm){
   // Pastikan WiFi tersambung
   if (WiFi.status() != WL_CONNECTED) {
@@ -154,41 +185,30 @@ void kirimDataSensor(uint16_t jarakMm){
   http.end();
 }
 
-
-// ----------------------------
-// Fungsi baca sensor
-void bacaSensor(){
-  if (sensorTerhubung) {
-    uint16_t measure = sensor.readRangeContinuousMillimeters();
-    if (measure <= 2000){
-      pakanJarak = measure;
-      Serial.printf("Jarak : %d mm\n", pakanJarak);
-      
-    }
-
-    else if (measure >= 65535){
-      Serial.printf(
-        "TIMEOUT, ada kabel lepas di sensor. Kode:%d\n",
-        measure
-      );
-      sensorTerhubung=false;
-    }
-
-    else if (measure >= 8190){
-      Serial.printf(
-        "OUT OF RANGE. Kode:%d\n",
-        measure
-      );
-    }
+void kirimFeedingLog(String triggerSource, float durationSeconds){
+  if (WiFi.status() != WL_CONNECTED) { 
+    Serial.println("WiFi belum tersambung. Log feeding tidak dikirim."); 
+    return; 
   }
 
+  String url = serverUrl + "/api/logs/feeding-event";
+
+  http.begin(client, url); http.addHeader("Content-Type", "application/json"); // Format JSON sesuai ekspektasi logController.js (triggerSource &amp; durationSeconds) 
+  String jsonData = "{"; 
+  jsonData += "\"triggerSource\":\"" + triggerSource + "\",";
+  jsonData += "\"durationSeconds\":" + String(durationSeconds); 
+  jsonData += "}"; 
+  
+  int httpResponseCode = http.POST(jsonData); 
+  
+  if (httpResponseCode > 0) { 
+    Serial.printf("✅ Feeding Log HTTP Response Code: %d\n", httpResponseCode);
+  } 
   else {
-    if (millis()-lastinisiasiSensor >= 10000){
-      lastinisiasiSensor = millis();
-      Serial.println("Mencoba Reconnect Sensor...");
-      inisiasiSensor();
-    }
+     Serial.printf("❌ Gagal kirim Feeding Log. Error: %s\n",
+      http.errorToString(httpResponseCode).c_str());
   }
+  http.end();
 }
 
 // ----------------------------
@@ -236,8 +256,9 @@ void loop(){
     kirimDataSensor(pakanJarak);
     Serial.println("Mengirim Data Sensor");
   }
-
-  if (millis() - lastloop >= delayLoop) // delay biar ga cepet banget
+  
+  // main loop
+  if (millis() - lastloop >= delayLoop)
   {
     lastloop = millis();
     // Ketika tombol ditekan
@@ -251,6 +272,7 @@ void loop(){
     if ((millis() - lastbukaPakan >= durasiBuka) && buttonDitekan){
       buttonDitekan = false;
       bukaPakan(false);
+      kirimFeedingLog("MANUAL", durasiBuka/1000.0);
     }
   }
 }
