@@ -5,12 +5,22 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <time.h>
+#include <ArduinoJson.h>
 
 // ----------------------------
 // Definisi WiFi & Server
 String ssid = "Juan";
 String pass = "tanoto1510";
 String serverUrl = "http://nga-untransforming-rick.ngrok-free.dev";
+
+// ----------------------------
+// Definisi Variabel yang boleh diubah
+#define MAX_JADWAL 3
+#define intervalbacaSensor 1000
+#define delayLoop 250
+#define intervalCekJadwal 30000
+#define durasiBukaManual 10000
+
 
 // ----------------------------
 // Definisi PIN
@@ -21,13 +31,24 @@ String serverUrl = "http://nga-untransforming-rick.ngrok-free.dev";
 #define pinXSHUTSensor 18
 
 // ----------------------------
+// Definisi konfigurasi NTP 
+const char* ntpServer = "pool.ntp.org"; 
+const long gmtOffset_sec = 7 * 3600;
+const int daylightOffset_sec = 0; 
+
+
+// ----------------------------
 // Definisi Global Variabel
 bool sensorTerhubung = true;
-bool buttonDitekan = false;
+bool sistemTerpicu = false;
 uint16_t pakanJarak = 0;
-const u_int16_t intervalbacaSensor = 1000;
-u_int16_t durasiBuka = 10000;
-u_int8_t delayLoop = 100;
+String menitTerakhirTerpicu = ""; // Mencegah pakan terpicu berulang di menit yang sama
+String triggerSourcePakan;
+
+String waktuLokal;
+int jumlahJadwal = 0;
+
+u_int32_t durasiBuka;
 
 u_int32_t lastloop = 0;
 u_int32_t lastbacaSensor = 0;
@@ -35,6 +56,7 @@ u_int32_t lastbukaPakan = 0;
 u_int32_t lastinisiasiSensor = 0;
 u_int32_t lastinisiasiWifi = 0;
 u_int32_t lastkirimData = 0;
+u_int32_t lastCekJadwal = 0;
 
 // ----------------------------
 // Pembuatan Objek
@@ -42,6 +64,12 @@ Servo servo;
 VL53L0X sensor;
 WiFiClient client;
 HTTPClient http;
+struct tm timeinfo;
+struct JadwalPakan {
+    String feedingTime;
+    int durationSeconds;
+}; 
+JadwalPakan daftarJadwal[MAX_JADWAL];
 
 // ----------------------------
 // Fungsi Servo
@@ -91,7 +119,9 @@ void inisiasiSensor(){
   sensor.setTimeout(50);
   sensor.stopContinuous();
   digitalWrite(pinXSHUTSensor, LOW);
+  delay(10);
   digitalWrite(pinXSHUTSensor,HIGH);
+  delay(10);
 
   if (!sensor.init()) {
       Serial.println("Gagal menemukan sensor VL53 saat booting.");
@@ -137,6 +167,8 @@ void bacaSensor(){
   }
 }
 
+// ----------------------------
+// Fungsi kirim dan get ke Backend
 void kirimDataSensor(uint16_t jarakMm){
   // Pastikan WiFi tersambung
   if (WiFi.status() != WL_CONNECTED) {
@@ -214,6 +246,25 @@ void kirimFeedingLog(String triggerSource, float durationSeconds){
   http.end();
 }
 
+void cekJadwalServer() { 
+  if (WiFi.status() != WL_CONNECTED) return; 
+
+  String url = serverUrl + "/api/schedules"; 
+  
+  http.begin(client, url); 
+  http.addHeader("ngrok-skip-browser-warning", "true");
+
+  int httpResponseCode = http.GET(); 
+  if (httpResponseCode == 200) { 
+    String payload = http.getString(); 
+    parseJadwalServer(payload); // Memanggil fungsi parsing yang sudah Anda buat
+  }
+  else { 
+    Serial.printf("❌ Gagal mengambil jadwal. HTTP Code: %d\n", httpResponseCode);
+  }
+  http.end(); 
+}
+
 // ----------------------------
 // Inisiasi WiFi
 void inisiasiWifi(){
@@ -224,6 +275,45 @@ void inisiasiWifi(){
 }
 
 // ----------------------------
+// Fungsi Pewaktuan
+String getwaktuLokal(){
+    if(!getLocalTime(&timeinfo)){
+        Serial.println("Gagal mendapatkan waktu NTP Server");
+        return "";
+    }
+
+    char timeFormatted[6];
+    strftime(timeFormatted, sizeof(timeFormatted), "%H:%M", &timeinfo);
+
+    return String(timeFormatted);
+}
+
+// ----------------------------
+// Fungsi Parsing Json
+void parseJadwalServer(String jsonPayload) { 
+    DynamicJsonDocument doc(1024); 
+    DeserializationError err = deserializeJson(doc, jsonPayload);
+
+    if (!err && doc["success"] == true) { 
+        JsonArray schedules = doc["data"].as<JsonArray>();
+        jumlahJadwal = 0;
+        
+        for (JsonObject sch : schedules){
+            if (jumlahJadwal >= MAX_JADWAL){
+                Serial.println("⚠️ Batas Jadwal sudah tercapai, mengabaikan sisanya");
+                break;
+            }
+
+            daftarJadwal[jumlahJadwal].feedingTime = sch["feedingTime"].as<String>();
+            daftarJadwal[jumlahJadwal].durationSeconds = sch["durationSeconds"] | 10;
+            jumlahJadwal++;
+        }
+
+        Serial.printf("✅ Berhasil memuat %d jadwal ke dalam ESP32. \n", jumlahJadwal);
+    }
+}
+
+// ----------------------------
 void setup(){
   // Begin
   Serial.begin(115200);
@@ -231,10 +321,11 @@ void setup(){
 
   // Inisiasi WiFi
   inisiasiWifi();
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   // Inisiasi Pin
   pinMode(pinXSHUTSensor,OUTPUT);
-  pinMode(pin_Button, INPUT);
+  pinMode(pin_Button, INPUT_PULLDOWN);
 
   // Panggil Fungsi untuk Setup
   Serial.println("Mencoba Inisiasi Relay, Servo, Sensor");
@@ -254,28 +345,59 @@ void loop(){
     bacaSensor();
   }
 
+  // kirim data sensor
   if (millis() - lastkirimData >= 10000){
     lastkirimData = millis();
     kirimDataSensor(pakanJarak);
     Serial.println("Mengirim Data Sensor");
   }
   
+  // minta jadwal ke backend
+  if (millis() - lastCekJadwal >= intervalCekJadwal){ 
+    lastCekJadwal = millis(); 
+    cekJadwalServer(); 
+  }
+  
   // main loop
   if (millis() - lastloop >= delayLoop)
   {
     lastloop = millis();
-    // Ketika tombol ditekan
-    if (digitalRead(pin_Button) && !buttonDitekan){
-      bukaPakan(true);
-      lastbukaPakan = millis();
-      buttonDitekan = true;
+    waktuLokal = getwaktuLokal();
+
+    // Pemicu: Jadwal
+    if (waktuLokal != "" && waktuLokal != menitTerakhirTerpicu && !sistemTerpicu) {
+        for (int i = 0; i < jumlahJadwal; i++) {
+            if(daftarJadwal[i].feedingTime == waktuLokal){
+                menitTerakhirTerpicu = waktuLokal;
+                triggerSourcePakan = "SCHEDULED";
+                durasiBuka = daftarJadwal[i].durationSeconds * 1000; // Konversi detik ke ms
+
+                bukaPakan(true);
+                lastbukaPakan = millis();
+                sistemTerpicu = true;
+                Serial.printf("⏰ Pakan Otomatis Terpicu pada Jadwal [%s]!\n", waktuLokal.c_str());
+                break;
+            }
+        }
     }
 
-    // Ketika waktu buka habis
-    if ((millis() - lastbukaPakan >= durasiBuka) && buttonDitekan){
-      buttonDitekan = false;
+    // Pemicu: Button
+    if (digitalRead(pin_Button) && !sistemTerpicu){
+      triggerSourcePakan = "MANUAL";
+      durasiBuka = durasiBukaManual;
+      bukaPakan(true);
+
+      lastbukaPakan = millis();
+      sistemTerpicu = true;
+      Serial.println("Tombol fisik ditekan");
+
+    }
+
+    // Penutupan Pakan & kirim Log 
+    if ((millis() - lastbukaPakan >= durasiBuka) && sistemTerpicu){
+      sistemTerpicu = false;
       bukaPakan(false);
-      kirimFeedingLog("MANUAL", durasiBuka/1000.0);
+      kirimFeedingLog(triggerSourcePakan, durasiBuka/1000.0);
     }
   }
 }
