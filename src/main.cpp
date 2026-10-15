@@ -154,9 +154,8 @@ void kirimDataSensor(uint16_t jarakMm){
   // Mulai HTTP connection
   http.begin(client, url);
 
-  // Header bahwa data yang dikirim adalah JSON
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("ngrok-skip-browser-warning", "true"); // <-- TAMBAHKAN INI
+  http.addHeader("ngrok-skip-browser-warning", "true");
 
   String jsonData = "{";
   jsonData += "\"distanceCm\":" + String(jarakCm, 1);
@@ -193,7 +192,11 @@ void kirimFeedingLog(String triggerSource, float durationSeconds){
 
   String url = serverUrl + "/api/logs/feeding-event";
 
-  http.begin(client, url); http.addHeader("Content-Type", "application/json"); // Format JSON sesuai ekspektasi logController.js (triggerSource &amp; durationSeconds) 
+  http.begin(client, url); 
+  
+  http.addHeader("Content-Type", "application/json"); // Format JSON sesuai ekspektasi logController.js (triggerSource &amp; durationSeconds) 
+  http.addHeader("ngrok-skip-browser-warning", "true");
+
   String jsonData = "{"; 
   jsonData += "\"triggerSource\":\"" + triggerSource + "\",";
   jsonData += "\"durationSeconds\":" + String(durationSeconds); 
@@ -262,7 +265,7 @@ void loop(){
   {
     lastloop = millis();
     // Ketika tombol ditekan
-    if (digitalRead(pin_Button)){
+    if (digitalRead(pin_Button) && !buttonDitekan){
       bukaPakan(true);
       lastbukaPakan = millis();
       buttonDitekan = true;
