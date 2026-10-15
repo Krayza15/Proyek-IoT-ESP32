@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <time.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 // ----------------------------
 // Definisi WiFi & Server
@@ -42,7 +43,8 @@ const int daylightOffset_sec = 0;
 bool sensorTerhubung = true;
 bool sistemTerpicu = false;
 uint16_t pakanJarak = 0;
-String menitTerakhirTerpicu = ""; // Mencegah pakan terpicu berulang di menit yang sama
+String waktuTerakhirTerpicu = ""; // Mencegah pakan terpicu berulang di menit yang sama
+String jsonJadwalLama = "";
 String triggerSourcePakan;
 
 String waktuLokal;
@@ -70,6 +72,8 @@ struct JadwalPakan {
     int durationSeconds;
 }; 
 JadwalPakan daftarJadwal[MAX_JADWAL];
+Preferences preferences;
+
 
 // ----------------------------
 // Fungsi Servo
@@ -260,8 +264,17 @@ void cekJadwalServer() {
 
   int httpResponseCode = http.GET(); 
   if (httpResponseCode == 200) { 
-    String payload = http.getString(); 
-    parseJadwalServer(payload); // Memanggil fungsi parsing yang sudah Anda buat
+    String payloadBaru = http.getString(); 
+    if (payloadBaru != jsonJadwalLama){
+      Serial.println("🔄 Perubahan jadwal terdeteksi! Memperbarui Preferences (Flash)...");
+      jsonJadwalLama = payloadBaru;
+
+      preferences.putString("schedules", payloadBaru);
+      parseJadwalServer(payloadBaru);
+    }
+    else{
+      // Serial.println("Tidak ada perubahan");
+    }
   }
   else { 
     Serial.printf("❌ Gagal mengambil jadwal. HTTP Code: %d\n", httpResponseCode);
@@ -323,6 +336,19 @@ void setup(){
   Serial.begin(115200);
   Wire.begin();
 
+  // Inisiasi Preference
+  preferences.begin("feeder", false); 
+
+  jsonJadwalLama = preferences.getString("schedules", ""); 
+  if (jsonJadwalLama.length() > 0) { 
+    Serial.println("📂 Memuat jadwal cadangan dari Preferences (Flash)..."); 
+    parseJadwalServer(jsonJadwalLama); 
+  }
+  else {
+    Serial.println("ℹ️ Belum ada jadwal tersimpan di Preferences.");
+  }
+
+
   // Inisiasi WiFi
   inisiasiWifi();
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
@@ -374,8 +400,8 @@ void loop(){
 
         for (int i = 0; i < jumlahJadwal; i++) {
             if(daftarJadwal[i].feedingTime == waktuLokal){
-                if (menitTerakhirTerpicu != waktuLokal){
-                    menitTerakhirTerpicu = waktuLokal;
+                if (waktuTerakhirTerpicu != waktuLokal){
+                    waktuTerakhirTerpicu = waktuLokal;
                     triggerSourcePakan = "SCHEDULED";
                     durasiBuka = daftarJadwal[i].durationSeconds * 1000; // Konversi detik ke ms
 
@@ -390,7 +416,7 @@ void loop(){
         }
 
         // Jika di menit ini tidak ada jadwal yang cocok, reset pembatas menit 
-        if (!jadwalCocok) { menitTerakhirTerpicu = ""; }
+        if (!jadwalCocok) { waktuTerakhirTerpicu = ""; }
     }
     
     // Pemicu: Button
