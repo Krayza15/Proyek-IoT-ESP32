@@ -20,7 +20,8 @@ String serverUrl = "http://nga-untransforming-rick.ngrok-free.dev";
 #define delayLoop 250
 #define intervalCekJadwal 30000
 #define durasiBukaManual 10000
-
+#define JARAK_KOSONG_CM 20.0
+#define JARAK_PENUH_CM 3.0
 
 // ----------------------------
 // Definisi PIN
@@ -35,7 +36,6 @@ String serverUrl = "http://nga-untransforming-rick.ngrok-free.dev";
 const char* ntpServer = "pool.ntp.org"; 
 const long gmtOffset_sec = 7 * 3600;
 const int daylightOffset_sec = 0; 
-
 
 // ----------------------------
 // Definisi Global Variabel
@@ -178,6 +178,9 @@ void kirimDataSensor(uint16_t jarakMm){
 
   float jarakCm = jarakMm / 10.0;
 
+  int remainingPct = map(jarakCm, JARAK_KOSONG_CM, JARAK_PENUH_CM, 0, 100);
+  remainingPct = constrain(remainingPct, 0, 100); // Kunci agar nilainya selalu 0% - 100%
+
   String url = serverUrl + "/api/logs/telemetry";
 
   Serial.println("Mengirim data ke:");
@@ -190,7 +193,8 @@ void kirimDataSensor(uint16_t jarakMm){
   http.addHeader("ngrok-skip-browser-warning", "true");
 
   String jsonData = "{";
-  jsonData += "\"distanceCm\":" + String(jarakCm, 1);
+  jsonData += "\"distanceCm\":" + String(jarakCm, 1) + ",";
+  jsonData += "\"remainingPct\":" + String(remainingPct);
   jsonData += "}";
 
   Serial.println("Data JSON:");
@@ -201,7 +205,7 @@ void kirimDataSensor(uint16_t jarakMm){
 
   // Cek hasil
   if (httpResponseCode > 0) {
-    Serial.printf("HTTP Response Code: %d\n", httpResponseCode);
+    Serial.printf("HTTP Response Code: %d (Sisa Pakan: %d%%)\n", httpResponseCode, remainingPct);
     String response = http.getString();
     Serial.println("Response Server:");
     Serial.println(response);
@@ -365,22 +369,30 @@ void loop(){
     waktuLokal = getwaktuLokal();
 
     // Pemicu: Jadwal
-    if (waktuLokal != "" && waktuLokal != menitTerakhirTerpicu && !sistemTerpicu) {
+    if (waktuLokal != "" && !sistemTerpicu) {
+        bool jadwalCocok = false;
+
         for (int i = 0; i < jumlahJadwal; i++) {
             if(daftarJadwal[i].feedingTime == waktuLokal){
-                menitTerakhirTerpicu = waktuLokal;
-                triggerSourcePakan = "SCHEDULED";
-                durasiBuka = daftarJadwal[i].durationSeconds * 1000; // Konversi detik ke ms
+                if (menitTerakhirTerpicu != waktuLokal){
+                    menitTerakhirTerpicu = waktuLokal;
+                    triggerSourcePakan = "SCHEDULED";
+                    durasiBuka = daftarJadwal[i].durationSeconds * 1000; // Konversi detik ke ms
 
-                bukaPakan(true);
-                lastbukaPakan = millis();
-                sistemTerpicu = true;
-                Serial.printf("⏰ Pakan Otomatis Terpicu pada Jadwal [%s]!\n", waktuLokal.c_str());
+                    bukaPakan(true);
+                    lastbukaPakan = millis();
+                    sistemTerpicu = true;
+                    Serial.printf("⏰ Pakan Otomatis Terpicu pada Jadwal [%s]!\n", waktuLokal.c_str());
+                }
+                jadwalCocok = true;
                 break;
             }
         }
-    }
 
+        // Jika di menit ini tidak ada jadwal yang cocok, reset pembatas menit 
+        if (!jadwalCocok) { menitTerakhirTerpicu = ""; }
+    }
+    
     // Pemicu: Button
     if (digitalRead(pin_Button) && !sistemTerpicu){
       triggerSourcePakan = "MANUAL";
